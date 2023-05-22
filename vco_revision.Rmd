@@ -36,6 +36,8 @@ library(tidyr)
 library(stringr)
 library(purrr)
 library(gt)
+library(ConsensusClusterPlus)
+library(klaR)
 
 #reading in the metastatic site data
 mm <- read_excel("~/Dog/Supplemental Table 1_VCO.xlsx")
@@ -139,8 +141,6 @@ print(p1)
 dev.off()
 ```
 ```{r}
-library(ConsensusClusterPlus)
-library(klaR)
 set.seed(2425)
 kmodesHook <- function(this_dist,k){
 tmp = kmodes(as.matrix(this_dist),modes = k)
@@ -384,6 +384,7 @@ pdf("~/Dog/mets_ALP.pdf")
 print(gm_table)
 dev.off()
 ```
+#Univariate correlation analysis of metastatic outgrowth patterns with Trial Arm
 ```{r}
 him_dat <- melt(table(data.frame(Site = mm$Trial, mets_grp = mm$Cluster)))
 pp <-ggplot(data = him_dat,
