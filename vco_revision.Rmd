@@ -1,0 +1,480 @@
+---
+title: "VCO_analyses"
+author: "Sushant Patkar"
+date: "2023-05-17"
+output: 
+  md_document:
+    variant: markdown_github
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(circlize)
+library(e1071)
+library(ComplexHeatmap)
+library(readxl)
+library(readr)
+library(dplyr)
+library(survival)
+library(survminer)
+library(ggplot2)
+library(GGally)
+library(data.table)
+library(factoextra)
+library(readr)
+library(readxl)
+library(cluster)
+library(rstatix)
+library(matrixStats)
+library(factoextra)
+library(ggalluvial)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(purrr)
+library(gt)
+
+#reading in the metastatic site data
+mm <- read_excel("~/Dog/Supplemental Table 1_VCO.xlsx")
+
+#remove empty columns
+mm$Cluster...23 <- NULL
+mm$Cluster...49 <- NULL
+mets_map <- (mm[,c(19:44)] == "1")*1
+mets_map <- as.matrix(mets_map)
+rownames(mets_map) <- mm$`Patient ID`
+mets_map[which(is.na(mets_map), arr.ind = T)] = 0
+mets_map_updated <- as.data.frame(mets_map)
+mets_map_updated <- mets_map_updated[,-which(colnames(mets_map_updated) %in% c("Omentum","Mesentery","Body Wall","Mediastinum","Pleura","Abdominal Mass","Meninges","Caudal Oral Cavity","Subcutaneos Tissue","Bladder"))]
+mets_map_updated <- as.matrix(mets_map_updated)
+mm2 = mets_map_updated[mets_map_updated[,1] == 0,2:ncol(mets_map_updated)]
+```
+
+```{r}
+#within sum of squares analysis of clusters
+set.seed(1234)
+#clustering analysis comparison
+fun.compute_withinss <- function(model, k = NULL) {
+  # Assign samples to clusters
+  clusters <- fun.assign_clusters(model = model, k = k)
+  
+  # Compute averages per cluster center
+  centers <- clusters %>% 
+    group_by(cluster) %>% 
+    summarize_all(mean) %>% 
+    pivot_longer(cols = -cluster, names_to = "question", values_to = "cluster_mean")
+  
+  # Compute sum of squared differences from cluster centers
+  out <- clusters %>% 
+    pivot_longer(cols = -cluster, names_to = "question", values_to = "response") %>% 
+    left_join(centers, by = c("cluster", "question")) %>% 
+    summarize(k = max(cluster),
+              withinss = sum((response - cluster_mean)^2)) %>% 
+    mutate(model = class(model)[1])
+  
+  return(out)
+}
+
+fun.assign_clusters <- function(model, k = NULL) {
+  if (class(model)[1] %in% c("kmodes")) {
+    cluster_assignment <- model$cluster
+  }
+  if (class(model)[1] %in% c("agnes", "diana")) {
+    if (is.null(k)) {
+      stop("k required for hierarchical models!")
+    }
+    cluster_assignment <- stats::cutree(model, k = k)
+  }
+  
+  clusters <- as.data.frame(mm2) %>% 
+    mutate(cluster = cluster_assignment)
+  
+  return(clusters)
+}
+
+
+#compute Jaccard distance matrix
+mat.dissimiarity <- stats::dist(mm2, method = "binary")
+
+#cluster using AGNES
+lst.agnes <- cluster::agnes(mat.dissimiarity, diss = TRUE, keep.diss = TRUE, method = "complete")
+tbl.agnes_withindiss <- 1:6 %>% 
+  map(~fun.compute_withinss(lst.agnes, .))
+tbl.agnes_withindiss <- Reduce(rbind, tbl.agnes_withindiss)  %>% 
+  mutate(withindiss = withinss)
+
+#cluster using DIANA
+lst.diana <- cluster::diana(mat.dissimiarity, diss = TRUE, keep.diss = TRUE)
+tbl.diana_withindiss <-  1:6 %>% 
+  map(~fun.compute_withinss(lst.diana, .))
+tbl.diana_withindiss <- Reduce(rbind, tbl.diana_withindiss) %>%
+  mutate(withindiss = withinss)
+
+#cluster using Kmodes
+lst.kmodes <- tibble(k = 1:6) %>%
+  mutate(
+    kclust = map(k, ~klaR::kmodes(mm2, modes = ., iter.max = 500))
+  )
+
+tbl.kmodes_withindiss <- lst.kmodes$kclust %>% 
+  map(fun.compute_withinss)
+tbl.kmodes_withindiss <- Reduce(rbind, tbl.kmodes_withindiss) %>% 
+  mutate(withindiss = withinss)
+
+fig.dissimilarity <- bind_rows(tbl.kmodes_withindiss,
+          tbl.agnes_withindiss, tbl.diana_withindiss)
+
+p1 <- ggplot(data = as.data.frame(fig.dissimilarity), aes(x = k, y = withindiss, color = model, linetype = model)) +
+  geom_line() +
+  scale_x_continuous(breaks = 1:20) + 
+  theme_minimal() +
+  labs(x = "Number of Clusters", y = bquote(W[k]), color = "Model", linetype = "Model",
+       title = "Within cluster sum of squares")
+print(p1)
+pdf("~/Dog/Clustering_analysis.pdf")
+print(p1)
+dev.off()
+```
+```{r}
+library(ConsensusClusterPlus)
+library(klaR)
+set.seed(2425)
+kmodesHook <- function(this_dist,k){
+tmp = kmodes(as.matrix(this_dist),modes = k)
+assignment = tmp$cluster
+return(assignment)
+}
+distfunc <- function(x){ dist(x,method="binary")}
+rcckmodes = ConsensusClusterPlus(t(mm2),maxK=6,reps=100,pItem=0.8,pFeature=1,title="example_kmodes",clusterAlg="kmodesHook", distance="distfunc", verbose = F, plot = "pdf")
+```
+
+```{r}
+set.seed(2425)
+agnesHook <- function(this_dist,k){
+ tmp = agnes(this_dist,diss=TRUE, method = "complete")
+ assignment = cutree(tmp,k)
+ return(assignment)
+}
+distfunc <- function(x){ dist(x,method="binary")}
+rccagnes = ConsensusClusterPlus(t(mm2),maxK=6,reps=100,pItem=0.8,pFeature=1,title="example_agnes",clusterAlg="agnesHook", distance="distfunc", verbose = F, plot = "pdf")
+```
+
+```{r}
+set.seed(2425)
+dianaHook <- function(this_dist,k){
+ tmp = diana(this_dist,diss=TRUE)
+ assignment = cutree(tmp,k)
+ return(assignment)
+}
+distfunc <- function(x){ dist(x,method="binary")}
+rccdiana = ConsensusClusterPlus(t(mm2),maxK=6,reps=100,pItem=0.8,pFeature=1,title="example_diana",clusterAlg="dianaHook", distance="distfunc", verbose = F, plot = "pdf")
+```
+```{r}
+col_fun = colorRamp2(c(0, 1), c("white", "black"))
+cluster <- rcckmodes[[2]]$consensusClass
+p1 <- Heatmap(mm2, split = as.character(cluster), cluster_columns = T, row_gap = unit(5, "mm"),col = col_fun)
+print(p1)
+#pdf(file = "~/Dog/mets_heatmap_kmodes2.pdf",width = 6, height = 10)
+#print(p1)
+#dev.off()
+
+dd <- data.frame(nmets = rowSums(mm2), cluster = as.character(cluster), stringsAsFactors = F)
+p1 <- ggplot(data = dd, aes(x = cluster, y = nmets)) + geom_boxplot() + theme_classic() + theme(text = element_text(size = 15)) + stat_compare_means()
+print(p1)
+```
+
+
+```{r}
+col_fun = colorRamp2(c(0, 1), c("white", "black"))
+cluster <- rccagnes[[2]]$consensusClass
+p1 <- Heatmap(mm2, split = as.character(cluster), cluster_columns = T, row_gap = unit(5, "mm"),col = col_fun)
+print(p1)
+#pdf(file = "~/Dog/mets_heatmap_agnes2.pdf",width = 6, height = 10)
+#print(p1)
+#dev.off()
+dd <- data.frame(nmets = rowSums(mm2), cluster = as.character(cluster), stringsAsFactors = F)
+p1 <- ggplot(data = dd, aes(x = cluster, y = nmets)) + geom_boxplot() + theme_classic() + theme(text = element_text(size = 15)) + stat_compare_means()
+print(p1)
+```
+```{r}
+col_fun = colorRamp2(c(0, 1), c("white", "black"))
+cluster <- rccdiana[[2]]$consensusClass
+p1 <- Heatmap(mm2, row_split = as.character(cluster), cluster_rows = T, row_gap = unit(5, "mm"),col = col_fun)
+print(p1)
+#pdf(file = "~/Dog/mets_heatmap_diana2.pdf",width = 6, height = 10)
+#print(p1)
+#dev.off()
+
+dd <- data.frame(nmets = rowSums(mm2), cluster = as.character(cluster), stringsAsFactors = F)
+p1 <- ggplot(data = dd, aes(x = cluster, y = nmets)) + geom_boxplot() + theme_classic() + theme(text = element_text(size = 15)) + stat_compare_means()
+print(p1)
+```
+
+```{r}
+#Scripts to read in the canine OS clinical metadata
+
+#clinical metadata for all cases that received Rapamycin (mTOR inhibitor) in addition to standard of care therapy
+Slides2Outcomes_Rapa_all <- read_csv("~/Dog/Slides2Outcomes_Rapa_all_new.csv")
+
+#clinical metadata for all cases that received standard of care therapy
+Slides2Outcomes_SOC_all <- read_csv("~/Dog/Slides2Outcomes_SOC_all_new.csv")
+
+dat1 <- subset(Slides2Outcomes_Rapa_all,select = c("slide","Patient ID","Tumor Location","Site","age","weight","breed","gender","PH","ALP","Group","DFI","DFI_censor","Survival (days from sx)","Surv_censor"))
+dat1$treatment = rep("Rapamycin", nrow(dat1))
+
+dat2 <- subset(Slides2Outcomes_SOC_all,select = c("slide","Patient ID","Tumor Location","Site","age","weight","breed","gender","PH","ALP","Group","DFI","DFI_censor","Survival (days from sx)","Surv_censor"))
+dat2$treatment = rep("SOC", nrow(dat2))
+
+clindat_all <- rbind(dat1,dat2)
+clindat_all <- as.data.frame(clindat_all)
+clindat_all <- clindat_all[!duplicated(clindat_all$slide),]
+rownames(clindat_all) <- substr(clindat_all$slide,1,19)
+clindat_all <- clindat_all[,-1]
+colnames(clindat_all)[c(11,12,13,14)] <- c("DFS_time","DFS_status","OS_time","OS_status")
+clindat_all$ALP[clindat_all$ALP == "elevated"] <- "Elevated"
+clindat_all$gender[clindat_all$`Patient ID` == "307"] <- "Spayed Female"
+clindat_all$gender[grepl("Castrated",clindat_all$gender)] <- "Castrated Male"
+clindat_all$gender[grepl("Spayed",clindat_all$gender)] <- "Spayed Female"
+clindat_all$gender[grepl("Male Phenotype",clindat_all$gender)] <- "Intact Male"
+clindat_all$gender[grepl("Female Phenotype",clindat_all$gender)] <- "Intact Female"
+clindat_all <- clindat_all[!duplicated(clindat_all$`Patient ID`),]
+c1 <- clindat_all
+rownames(c1) <- c1$`Patient ID`
+
+
+c1 = c1[rownames(mets_map_updated),]
+met_grp <- rep("no mets", 83)
+met_grp[mets_map_updated[,1] == 0] <- as.character(cluster)
+c1$mets_grp <- met_grp
+
+#Perform Kaplan Meier analysis
+surv <- survfit(Surv(OS_time, OS_status) ~ mets_grp, data = c1[c1$mets_grp != "no mets",])
+diff <- survdiff(Surv(OS_time, OS_status) ~ mets_grp, data = c1[c1$mets_grp != "no mets",])
+
+p1 <- ggsurvplot(surv, data = c1[c1$mets_grp != "no mets",],
+                  
+                  legend.title = "Dog osteosarcoma overall survival (N = 71)",
+                  legend = "top",
+                  conf.int = T,
+                  pval = TRUE,
+                  risk.table = TRUE,
+                  tables.height = 0.2,
+                  tables.theme = theme_cleantable(),
+                  risk.table.y.text = FALSE,
+                 pval.coord = c(0, 0.03),
+                  # Color palettes. Use custom color: c("#E7B800", "#2E9FDF"),
+                  # or brewer color (e.g.: "Dark2"), or ggsci color (e.g.: "jco")
+                  ggtheme = theme(text = element_text(size = 15)) + theme_bw() # Change ggplot2 theme
+) + xlab("Time (days from sx)")
+print(p1)
+print(surv_median(surv))
+
+surv <- survfit(Surv(DFS_time, DFS_status) ~ mets_grp, data = c1[c1$mets_grp != "no mets",])
+diff <- survdiff(Surv(DFS_time, DFS_status) ~ mets_grp, data = c1[c1$mets_grp != "no mets",])
+
+p2 <- ggsurvplot(surv, data = c1[c1$mets_grp != "no mets",],
+                  legend.title = "Dog osteosarcoma DFI (N = 71)",
+                 legend = "top",
+                  conf.int = T,
+                  pval = TRUE,
+                  risk.table = TRUE,
+                  tables.height = 0.2,
+                  tables.theme = theme_cleantable(),
+                  risk.table.y.text = FALSE,
+                 pval.coord = c(0, 0.03),
+                  # Color palettes. Use custom color: c("#E7B800", "#2E9FDF"),
+                  # or brewer color (e.g.: "Dark2"), or ggsci color (e.g.: "jco")
+                  ggtheme = theme(text = element_text(size = 15)) + theme_bw() # Change ggplot2 theme
+)
+print(p2)
+
+survfig <- ggarrange(p1[[1]],p2[[1]],p1[[2]],p2[[2]], labels = c("A","B","",""), ncol = 2, nrow = 2, heights = c(3,1))
+print(survfig)
+pdf("~/Dog/vco_metsites_survival_fig.pdf", width = 7, height = 4)
+print(survfig)
+dev.off()
+
+```
+
+#Univariate correlation analysis of metastatic outgrowth patterns with site of enrollment
+```{r}
+library(mmtable2)
+mm$Cluster <- met_grp
+mm$Cluster[mm$Cluster == "no mets"] <- "no known mets"
+him_dat <- melt(table(data.frame(Site = mm$Site, mets_grp = mm$Cluster)))
+pp <-ggplot(data = him_dat,
+       aes(axis1 = Site, axis2 = mets_grp, y = value)) +
+  geom_alluvium(aes(fill = mets_grp)) +
+  geom_stratum() +
+  geom_text(stat = "stratum",
+            aes(label = after_stat(stratum))) +
+  theme_void()
+
+print(pp)
+print(t(table(data.frame(Site = mm$Site, mets_grp = mm$Cluster))))
+print(chisq.test(table(data.frame(Site = mm$Site, mets_grp = mm$Cluster))))
+
+style_list <- list(cell_borders(sides = "top",color = "grey"))
+gm_table <- 
+ him_dat %>% 
+  mmtable(cells = value) +
+  header_left(mets_grp) +
+  header_top(Site) +
+  header_format(Site, scope = "table", style = style_list)
+print(gm_table)
+pdf("~/Dog/mets_institute.pdf")
+print(gm_table)
+dev.off()
+```
+#Univariate correlation analysis of metastatic outgrowth patterns with primary tumor location
+```{r}
+mm$PH <- c("Proximal to Humerus","Non proximal to Humerus")[as.numeric(grepl("distal",mm$`Tumor Location`))+1]
+mm$location1 <- gsub("(Left)|(Right)","", mm$`Tumor Location`)
+him_dat <- melt(table(data.frame(Site = mm$PH, mets_grp = mm$Cluster)))
+pp <-ggplot(data = him_dat,
+       aes(axis1 = Site, axis2 = mets_grp, y = value)) +
+  geom_alluvium(aes(fill = mets_grp)) +
+  geom_stratum() +
+  geom_text(stat = "stratum",
+            aes(label = after_stat(stratum))) +
+  theme_void()
+
+print(pp)
+print(table(data.frame(Site = mm$PH, mets_grp = mm$Cluster)))
+print(chisq.test(table(data.frame(Site = mm$PH, mets_grp = mm$Cluster))))
+
+style_list <- list(cell_borders(sides = "top",color = "grey"))
+gm_table <- 
+ him_dat %>% 
+  mmtable(cells = value) +
+  header_left(mets_grp) +
+  header_top(Site) +
+  header_format(Site, scope = "table", style = style_list)
+print(gm_table)
+pdf("~/Dog/mets_tumorlocation.pdf")
+print(gm_table)
+dev.off()
+```
+#Univariate correlation analysis of metastatic outgrowth patterns with ALP levels
+```{r}
+him_dat <- melt(table(data.frame(Site = mm$ALP, mets_grp = mm$Cluster)))
+pp <-ggplot(data = him_dat,
+       aes(axis1 = Site, axis2 = mets_grp, y = value)) +
+  geom_alluvium(aes(fill = mets_grp)) +
+  geom_stratum() +
+  geom_text(stat = "stratum",
+            aes(label = after_stat(stratum))) +
+  theme_void()
+
+print(pp)
+print(table(data.frame(Site = mm$ALP, mets_grp = mm$Cluster)))
+print(chisq.test(table(data.frame(Site = mm$ALP, mets_grp = mm$Cluster))))
+style_list <- list(cell_borders(sides = "top",color = "grey"))
+gm_table <- 
+ him_dat %>% 
+  mmtable(cells = value) +
+  header_left(mets_grp) +
+  header_top(Site) +
+  header_format(Site, scope = "table", style = style_list)
+print(gm_table)
+pdf("~/Dog/mets_ALP.pdf")
+print(gm_table)
+dev.off()
+```
+```{r}
+him_dat <- melt(table(data.frame(Site = mm$Trial, mets_grp = mm$Cluster)))
+pp <-ggplot(data = him_dat,
+       aes(axis1 = Site, axis2 = mets_grp, y = value)) +
+  geom_alluvium(aes(fill = mets_grp)) +
+  geom_stratum() +
+  geom_text(stat = "stratum",
+            aes(label = after_stat(stratum))) +
+  theme_void()
+
+print(pp)
+print(table(data.frame(Site = mm$Trial, mets_grp = mm$Cluster)))
+print(chisq.test(table(data.frame(Site = mm$Trial, mets_grp = mm$Cluster))))
+style_list <- list(cell_borders(sides = "top",color = "grey"))
+gm_table <- 
+ him_dat %>% 
+  mmtable(cells = value) +
+  header_left(mets_grp) +
+  header_top(Site) +
+  header_format(Site, scope = "table", style = style_list)
+print(gm_table)
+pdf("~/Dog/mets_Trial_arm.pdf")
+print(gm_table)
+dev.off()
+```
+
+
+#Cluster-specific differential expression analysis
+```{r}
+library(edgeR)
+library(matrixStats)
+library(fgsea)
+library(tidyverse)
+library(msigdbr)
+library(clusterProfiler)
+DOG2_Raw_RNA_SEQ_DATA <- read_csv("~/Dog/DOG2_Raw_RNA_SEQ_DATA.csv")
+genes <- DOG2_Raw_RNA_SEQ_DATA$gene_id
+genes <- sapply(genes, function(x) strsplit(x, split = "_")[[1]][1])
+DOG2_Raw_RNA_SEQ_DATA$gene_id <- NULL
+common <- intersect(colnames(DOG2_Raw_RNA_SEQ_DATA), as.character(names(cluster)))
+clss <- as.character(cluster)
+names(clss) <- names(cluster)
+groups = clss[common]
+groups = c("rest","1")[as.numeric(groups == "1")+1]
+counts.DGEList <- DGEList(counts = DOG2_Raw_RNA_SEQ_DATA[,common], genes = genes, group = as.factor(groups))
+counts.keep <- filterByExpr(y = counts.DGEList)
+counts.DGEList <- counts.DGEList[counts.keep, , keep.lib.sizes = FALSE]
+counts.DGEList <- calcNormFactors(counts.DGEList)
+counts.DGEList <- estimateDisp(counts.DGEList,design = model.matrix(~groups))
+rest_1.DGEExact <- exactTest(counts.DGEList, pair = c("rest","1"))
+msigdbr_df <- msigdbr(species = "Homo sapiens", category = "H")
+msigdbr_list = split(x = msigdbr_df$gene_symbol, f = msigdbr_df$gs_name)
+ranks <- rest_1.DGEExact$table$logFC
+names(ranks) <- counts.DGEList$genes$genes
+ranks <- sort(ranks, decreasing = T)
+gsea_res <- GSEA(geneList = ranks, TERM2GENE = subset(msigdbr_df, select = c("gs_name","gene_symbol")),pvalueCutoff = 1, nPermSimple = 100000)
+fgseaResTidy_1 <- gsea_res %>%
+as_tibble() %>%
+arrange(desc(NES))
+p1 <- ggplot(fgseaResTidy_1, aes(reorder(ID, NES), NES)) +
+geom_col(aes(fill=p.adjust < 0.05)) +
+coord_flip() +
+labs(x="Pathway", y="Normalized Enrichment Score",title="Hallmark pathways NES from GSEA") + 
+  theme_minimal()
+print(p1)
+
+pdf("~/Dog/revisedVCO_DE_analysis.pdf", width = 8, height = 7)
+print(p1)
+dev.off()
+```
+#Heat map visualization of top 10 leading edge genes from enriched pathways in each cluster
+```{r}
+logcounts <- apply(cpm(counts.DGEList,log=TRUE),2,scale)
+rownames(logcounts) <- counts.DGEList$genes$genes
+ha = columnAnnotation(
+    Cluster = as.character(clss[common]),
+    col = list("Cluster"= c("1" =  "#CC6677", "2" = "#88CCEE"))
+)
+core_genes_1 <- strsplit(fgseaResTidy_1$core_enrichment[1],"/")[[1]]
+core_genes_1 <- names(sort(sapply(core_genes_1, function(x) which(names(ranks) == x)))[1:10])
+gsets_1 <- rep(fgseaResTidy_1$ID[1],10)
+core_genes_2 <- Reduce(c, sapply(fgseaResTidy_1$core_enrichment[fgseaResTidy_1$NES < 0 & fgseaResTidy_1$p.adjust < 0.05], function(x) {
+  gs <- strsplit(x,"/")[[1]]
+  gs <- names(sort(sapply(gs, function(y) which(names(ranks) == y)), decreasing = T)[1:10])
+  }))
+gsets_2 <- Reduce(c, sapply(fgseaResTidy_1$ID[fgseaResTidy_1$NES < 0 & fgseaResTidy_1$p.adjust < 0.05], function(x) {
+  rep(x, 10)
+  }))
+Heatmap((logcounts[c(core_genes_1,core_genes_2), common]), top_annotation = ha, cluster_rows = T, column_split = as.character(clss[common]), row_split = c(gsets_1, gsets_2), cluster_row_slices = F, cluster_column_slices = T)
+pdf("~/Dog/vco_enrichment_heatmap.pdf", height = 14, width = 8)
+Heatmap((logcounts[c(core_genes_1,core_genes_2), common]), top_annotation = ha, cluster_rows = T, column_split = as.character(clss[common]), row_split = gsub("HALLMARK_","",c(gsets_1, gsets_2)), cluster_row_slices = F, cluster_column_slices = T)
+dev.off()
+```
+
